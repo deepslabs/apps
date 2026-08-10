@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { SubmittableExtrinsic } from '@polkadot/api/types';
+import type { Bytes, Option as CodecOption } from '@polkadot/types';
 import type { AccountId, Call, H256, Multisig } from '@polkadot/types/interfaces';
 import type { CallFunction } from '@polkadot/types/types';
 
@@ -38,6 +39,8 @@ interface CallData {
   callError: string | null;
   callInfo: CallFunction | null;
 }
+
+type ExtendedMultisig = Multisig & { call: CodecOption<Bytes> };
 
 const EMPTY_CALL: CallData = {
   callData: null,
@@ -116,8 +119,23 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
         assert(isHex(callHex), 'Hex call data required');
 
         const callData = api.createType('Call', callHex);
+        const typedCallData = callData as Call;
 
-        assert(callData.hash.eq(hash), 'Call data does not match the existing call hash');
+        const extendedMultisig = multisig as ExtendedMultisig;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        const storedCall = multisig && 'call' in multisig && extendedMultisig.call.isSome
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+          ? extendedMultisig.call.unwrap()
+          : null;
+
+        let callMatches = typedCallData.hash.eq(hash);
+
+        if (storedCall) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+          callMatches = storedCall.toHex() === typedCallData.toHex();
+        }
+
+        assert(callMatches, 'Call data does not match the existing call hash');
 
         const callInfo = api.registry.findMetaCall(callData.callIndex);
 
@@ -128,7 +146,7 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
     } else {
       setCallData(EMPTY_CALL);
     }
-  }, [api, callHex, hash]);
+  }, [api, callHex, hash, multisig]);
 
   // based on the type, multisig, others create the tx. This can be either an approval or final call
   useEffect((): void => {

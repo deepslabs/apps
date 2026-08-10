@@ -11,8 +11,9 @@ import type { SubmittableExtrinsic } from '@polkadot/api/types';
 import type { Ledger, LedgerGeneric } from '@polkadot/hw-ledger';
 import type { KeyringPair } from '@polkadot/keyring/types';
 import type { QueueTx, QueueTxMessageSetStatus } from '@polkadot/react-components/Status/types';
-import type { Option } from '@polkadot/types';
-import type { Multisig, Timepoint } from '@polkadot/types/interfaces';
+import type { Option, StorageKey } from '@polkadot/types';
+import type { H256, Multisig, Timepoint } from '@polkadot/types/interfaces';
+import type { Bytes } from '@polkadot/types/primitive';
 import type { BN } from '@polkadot/util';
 import type { HexString } from '@polkadot/util/types';
 import type { AddressFlags, AddressProxy, ExtendedSignerOptions, QrState } from './types.js';
@@ -36,6 +37,8 @@ import Tip from './Tip.js';
 import Transaction from './Transaction.js';
 import { useTranslation } from './translate.js';
 import { cacheUnlock, extractExternal, handleTxResults } from './util.js';
+
+type ExtendedMultisig = Multisig & { call: Option<Bytes> };
 
 interface Props {
   className?: string;
@@ -157,9 +160,34 @@ async function wrapTx (api: ApiPromise, currentItem: QueueTx, { isMultiCall, mul
 
   if (multiRoot) {
     const multiModule = api.tx.multisig ? 'multisig' : 'utility';
+    const isExtendedMultisig = !!api.tx.multisig?.registerMultiAccount;
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const [info, { weight }] = await Promise.all([
-      api.query[multiModule].multisigs<Option<Multisig>>(multiRoot, tx.method.hash),
+    const [{ callHash, info }, { weight }] = await Promise.all([
+      isExtendedMultisig
+        ? api.query[multiModule].multisigs.entries(multiRoot).then((entries: [StorageKey, Option<Multisig>][]) => {
+          const match = entries.find(([, option]) => {
+            if (option.isNone) {
+              return false;
+            }
+
+            const call = (option.unwrap() as ExtendedMultisig).call;
+
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            const callData = call?.isSome ? call.unwrap() : null;
+
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+            return !!callData && callData.toHex() === tx.method.toHex();
+          });
+
+          return {
+            callHash: (match?.[0].args[1] as H256) || tx.method.hash,
+            info: match?.[1] || api.createType('Option<Multisig>')
+          };
+        })
+        : Promise.resolve({
+          callHash: tx.method.hash,
+          info: await api.query[multiModule].multisigs<Option<Multisig>>(multiRoot, tx.method.hash)
+        }),
       tx.paymentInfo(multiRoot) as Promise<{ weight: any }>
     ]);
 
@@ -191,10 +219,10 @@ async function wrapTx (api: ApiPromise, currentItem: QueueTx, { isMultiCall, mul
           : api.tx[multiModule].asMulti(threshold, others, timepoint, tx.method)
       : api.tx[multiModule].approveAsMulti.meta.args.length === 5
         // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-        ? api.tx[multiModule].approveAsMulti(threshold, others, timepoint, tx.method.hash, weight)
+        ? api.tx[multiModule].approveAsMulti(threshold, others, timepoint, callHash, weight)
         // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
-        : api.tx[multiModule].approveAsMulti(threshold, others, timepoint, tx.method.hash);
+        : api.tx[multiModule].approveAsMulti(threshold, others, timepoint, callHash);
   }
 
   return tx;
