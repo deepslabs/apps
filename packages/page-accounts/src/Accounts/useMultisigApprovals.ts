@@ -43,10 +43,20 @@ function useMultisigApprovalsImpl (address: string): [H256, Multisig][] | undefi
   useEffect((): void => {
     trigger && api.query.multisig?.multisigs && api.query.multisig?.multisigs
       .entries(address)
-      .then((infos: [StorageKey, Option<Multisig>][]): void => {
+      .then(async (infos: [StorageKey, Option<Multisig>][]): Promise<void> => {
+        // The extended multisig pallet keeps the storage entry after a call is
+        // executed - the hash is tracked in `executedCalls` instead of being
+        // removed. Filter those out so executed calls no longer show as pending
+        let executed: H256[] = [];
+
+        if (api.query.multisig?.executedCalls) {
+          executed = (await api.query.multisig.executedCalls(address)) as unknown as H256[];
+        }
+
         mountedRef.current && setMultiInfos(
           infos
             .filter(([, opt]) => opt.isSome)
+            .filter(([key]) => !executed.some((h) => h.eq(key.args[1])))
             .map(([key, opt]) => [key.args[1] as H256, opt.unwrap()])
         );
       })

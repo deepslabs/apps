@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { SubmittableExtrinsic } from '@polkadot/api/types';
+import type { Bytes, Option as CodecOption } from '@polkadot/types';
 import type { AccountId, Call, H256, Multisig } from '@polkadot/types/interfaces';
 import type { CallFunction } from '@polkadot/types/types';
 
@@ -39,6 +40,8 @@ interface CallData {
   callInfo: CallFunction | null;
 }
 
+type ExtendedMultisig = Multisig & { call: CodecOption<Bytes> };
+
 const EMPTY_CALL: CallData = {
   callData: null,
   callError: null,
@@ -49,6 +52,10 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
   const { t } = useTranslation();
   const { api } = useApi();
   const { allAccounts } = useAccounts();
+  // The extended multisig pallet (identified by the presence of
+  // register_multi_account) stores the full call data on-chain and executes it
+  // from approve_as_multi once the threshold is reached
+  const isExtendedMultisig = !!api.tx.multisig?.registerMultiAccount;
   const [callHex, setCallHex] = useState<string>('');
   const [{ callData, callError, callInfo }, setCallData] = useState<CallData>(EMPTY_CALL);
   const { encodedCallLength, weight } = useWeight(callData);
@@ -71,6 +78,17 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
     [ongoing]
   );
 
+  // keep the selection in sync with the pending list - when a call is executed
+  // or cancelled it is removed from the list, so drop the finished hash and
+  // fall back to the first outstanding one (closing when nothing remains)
+  useEffect((): void => {
+    if (!hash || !ongoing.some(([h]) => h.eq(hash))) {
+      ongoing.length
+        ? setHash(ongoing[0][0].toHex())
+        : onClose();
+    }
+  }, [hash, ongoing, onClose]);
+
   // filter the current multisig by supplied hash
   useEffect((): void => {
     const [, multisig] = ongoing.find(([h]) => h.eq(hash)) || [null, null];
@@ -79,8 +97,20 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
       isMultiCall: !!multisig && (multisig.approvals.length + 1) >= threshold,
       multisig
     });
-    setCallHex('');
-    setCallData(EMPTY_CALL);
+
+    const extendedMultisig = multisig as ExtendedMultisig;
+    // the multisig pallet stores the full call data on-chain (Multisig.call),
+    // auto-fill the "call data for final approval" input where available
+    const storedCall = multisig && 'call' in multisig && extendedMultisig.call.isSome
+      ? extendedMultisig.call.unwrap()
+      : null;
+
+    if (storedCall) {
+      setCallHex(storedCall.toHex());
+    } else {
+      setCallHex('');
+      setCallData(EMPTY_CALL);
+    }
   }, [hash, ongoing, threshold]);
 
   // the others are all the who elements, without the current signatory (re-encoded)
@@ -116,8 +146,23 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
         assert(isHex(callHex), 'Hex call data required');
 
         const callData = api.createType('Call', callHex);
+        const typedCallData = callData as Call;
 
-        assert(callData.hash.eq(hash), 'Call data does not match the existing call hash');
+        const extendedMultisig = multisig as ExtendedMultisig;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        const storedCall = multisig && 'call' in multisig && extendedMultisig.call.isSome
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+          ? extendedMultisig.call.unwrap()
+          : null;
+
+        let callMatches = typedCallData.hash.eq(hash);
+
+        if (storedCall) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+          callMatches = storedCall.toHex() === typedCallData.toHex();
+        }
+
+        assert(callMatches, 'Call data does not match the existing call hash');
 
         const callInfo = api.registry.findMetaCall(callData.callIndex);
 
@@ -128,7 +173,7 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
     } else {
       setCallData(EMPTY_CALL);
     }
-  }, [api, callHex, hash]);
+  }, [api, callHex, hash, multisig]);
 
   // based on the type, multisig, others create the tx. This can be either an approval or final call
   useEffect((): void => {
@@ -137,29 +182,41 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
     setTx(() =>
       hash && multisig
         ? type === 'aye'
-          ? isMultiCall && isCallOverride
-            ? callData
-              ? multiMod.asMulti.meta.args.length === 5
-                // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-                ? multiMod.asMulti(threshold, others, multisig.when, callData.toHex(), weight as any)
-                : multiMod.asMulti.meta.args.length === 6
-                  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                  // @ts-ignore (We are doing toHex here since we have a Vec<u8> input)
-                  ? multiMod.asMulti(threshold, others, multisig.when, callData.toHex(), false, weight)
-                  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                  // @ts-ignore (We are doing toHex here since we have a Vec<u8> input)
-                  : multiMod.asMulti(threshold, others, multisig.when, callData)
-              : null
-            : multiMod.approveAsMulti.meta.args.length === 5
+          ? isExtendedMultisig
+            // The extended multisig pallet executes the stored call from
+            // approve_as_multi once the threshold is reached. as_multi cannot
+            // be used for existing operations - it recomputes the call hash
+            // with the current timepoint, so the stored operation is never
+            // found and the runtime fails with `UnexpectedTimepoint`
+            ? multiMod.approveAsMulti.meta.args.length === 5
               // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
               ? multiMod.approveAsMulti(threshold, others, multisig.when, hash, weight as any)
               // eslint-disable-next-line @typescript-eslint/ban-ts-comment
               // @ts-ignore
               : multiMod.approveAsMulti(threshold, others, multisig.when, hash)
+            : isMultiCall && isCallOverride
+              ? callData
+                ? multiMod.asMulti.meta.args.length === 5
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+                  ? multiMod.asMulti(threshold, others, multisig.when, callData.toHex(), weight as any)
+                  : multiMod.asMulti.meta.args.length === 6
+                    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+                    // @ts-ignore (We are doing toHex here since we have a Vec<u8> input)
+                    ? multiMod.asMulti(threshold, others, multisig.when, callData.toHex(), false, weight)
+                    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+                    // @ts-ignore (We are doing toHex here since we have a Vec<u8> input)
+                    : multiMod.asMulti(threshold, others, multisig.when, callData)
+                : null
+              : multiMod.approveAsMulti.meta.args.length === 5
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+                ? multiMod.approveAsMulti(threshold, others, multisig.when, hash, weight as any)
+                // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+                // @ts-ignore
+                : multiMod.approveAsMulti(threshold, others, multisig.when, hash)
           : multiMod.cancelAsMulti(threshold, others, multisig.when, hash)
         : null
     );
-  }, [api, callData, hash, isCallOverride, isMultiCall, others, multisig, threshold, type, weight]);
+  }, [api, callData, hash, isCallOverride, isExtendedMultisig, isMultiCall, others, multisig, threshold, type, weight]);
 
   const isAye = type === 'aye';
 
@@ -260,18 +317,20 @@ function MultisigApprove ({ className = '', onClose, ongoing, threshold = 0, who
                     )}
                   </Modal.Columns>
                 )}
-                <Modal.Columns hint={t('Swap to a non-executing approval type, with subsequent calls providing the actual call data.')}>
-                  <Toggle
-                    className='tipToggle'
-                    label={
-                      isMultiCall
-                        ? t('Multisig message with call (for final approval)')
-                        : t('Multisig approval with hash (non-final approval)')
-                    }
-                    onChange={setCallOverride}
-                    value={isCallOverride}
-                  />
-                </Modal.Columns>
+                {!isExtendedMultisig && (
+                  <Modal.Columns hint={t('Swap to a non-executing approval type, with subsequent calls providing the actual call data.')}>
+                    <Toggle
+                      className='tipToggle'
+                      label={
+                        isMultiCall
+                          ? t('Multisig message with call (for final approval)')
+                          : t('Multisig approval with hash (non-final approval)')
+                      }
+                      onChange={setCallOverride}
+                      value={isCallOverride}
+                    />
+                  </Modal.Columns>
+                )}
               </>
             )}
           </>
