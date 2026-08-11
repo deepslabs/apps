@@ -203,7 +203,12 @@ async function wrapTx (api: ApiPromise, currentItem: QueueTx, { isMultiCall, mul
 
     // Check if this is the first approval (no existing multisig)
     const isFirstApproval = info.isNone;
-    const shouldUseAsMulti = isFirstApproval || isMultiCall;
+    // The extended multisig pallet stores the call on-chain and executes it
+    // from approve_as_multi once the threshold is reached. as_multi is only
+    // usable for the first approval - for existing operations it recomputes
+    // the call hash with the current timepoint, never finds the stored
+    // operation and fails with `UnexpectedTimepoint`
+    const shouldUseAsMulti = isFirstApproval || (!isExtendedMultisig && isMultiCall);
 
     tx = shouldUseAsMulti
       ? api.tx[multiModule].asMulti.meta.args.length === 5
