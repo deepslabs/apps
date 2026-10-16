@@ -44,6 +44,8 @@
   "Inject Keys": "Inject Keys",
   "Inject session keys (advanced)": "Inject session keys (advanced)",
   "Keys from rotateKeys": "Keys from rotateKeys",
+  "An optional proof supplied to session.setKeys.": "An optional proof supplied to session.setKeys.",
+  "Proof (optional)": "Proof (optional)",
   "Last Session Report End Index": "Last Session Report End Index",
   "No active validators found": "No active validators found",
   "No events available": "No events available",

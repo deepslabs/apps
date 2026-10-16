@@ -27,18 +27,19 @@ function SessionKey ({ className = '', controllerId, onChange, stashId, withFocu
   const { t } = useTranslation();
   const { api } = useApi();
   const [keys, setKeys] = useState<string | null>(null);
+  const [proof, setProof] = useState<string | null>(null);
 
   useEffect((): void => {
     try {
       onChange({
-        sessionTx: isHex(keys)
-          ? api?.tx.session.setKeys(keys, EMPTY_PROOF)
+        sessionTx: isHex(keys) && (!proof || isHex(proof))
+          ? api?.tx.session.setKeys(keys, proof || EMPTY_PROOF)
           : null
       });
     } catch {
       onChange({ sessionTx: null });
     }
-  }, [api?.tx.session, keys, onChange]);
+  }, [api?.tx.session, keys, onChange, proof]);
 
   return (
     <div className={className}>
@@ -54,6 +55,14 @@ function SessionKey ({ className = '', controllerId, onChange, stashId, withFocu
           isError={!keys}
           label={t('Keys from rotateKeys')}
           onChange={setKeys}
+          placeholder='0x...'
+        />
+      </Modal.Columns>
+      <Modal.Columns hint={t('An optional proof supplied to session.setKeys.')}>
+        <Input
+          isError={!!proof && !isHex(proof)}
+          label={t('Proof (optional)')}
+          onChange={setProof}
           placeholder='0x...'
         />
       </Modal.Columns>
